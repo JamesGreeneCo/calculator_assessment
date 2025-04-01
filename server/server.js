@@ -83,16 +83,17 @@ app.get('/distance', apiLimiter, async (req, res) => {
     const originalAddress1 = address1;
     const originalAddress2 = address2;
     
-    address1 = addressService.processAddress(address1);
-    address2 = addressService.processAddress(address2);
-    
-    if (address1 !== originalAddress1 || address2 !== originalAddress2) {
-      console.log('Address processing applied:');
-      console.log(`Address 1: "${originalAddress1}" → "${address1}"`);
-      console.log(`Address 2: "${originalAddress2}" → "${address2}"`);
+    if (addressService && typeof addressService.processAddress === 'function') {
+      address1 = addressService.processAddress(address1);
+      address2 = addressService.processAddress(address2);
+      
+      if (address1 !== originalAddress1 || address2 !== originalAddress2) {
+        console.log('Address processing applied:');
+        console.log(`Address 1: "${originalAddress1}" → "${address1}"`);
+        console.log(`Address 2: "${originalAddress2}" → "${address2}"`);
+      }
     }
     
-    // Check MongoDB cache first
     let result;
     let fromCache = false;
     
@@ -105,18 +106,15 @@ app.get('/distance', apiLimiter, async (req, res) => {
       }
     }
     
-    // If not in cache, calculate the distance
     if (!result) {
       console.log('Calculating distance for', address1, address2);
-      result = distanceService.getDistanceBetween(address1, address2);
+      result = await distanceService.getDistanceBetween(address1, address2);
       
-      // Save to MongoDB cache
       if (dbService.isConnected()) {
         await cacheService.set(address1, address2, result);
       }
     }
     
-    // Add metadata to the result
     result.originalAddresses = {
       address1: originalAddress1,
       address2: originalAddress2
@@ -124,13 +122,40 @@ app.get('/distance', apiLimiter, async (req, res) => {
     
     result.fromCache = fromCache;
     
-    // Record query in history (even if from cache)
     if (dbService.isConnected()) {
       try {
-        await dbService.getDb().collection('distances').insertOne({
-          ...result,
-          timestamp: new Date()
-        });
+        const resultForStorage = {
+          address1: { 
+            query: originalAddress1, 
+            coordinates: { 
+              lat: result.locations.origin.coordinates.lat, 
+              lng: result.locations.origin.coordinates.lon 
+            }
+          },
+          address2: { 
+            query: originalAddress2, 
+            coordinates: { 
+              lat: result.locations.destination.coordinates.lat, 
+              lng: result.locations.destination.coordinates.lon 
+            }
+          },
+          distance: { 
+            miles: result.distance.miles, 
+            kilometers: result.distance.kilometers 
+          },
+          fromCache: fromCache,
+          locations: { 
+            origin: { address: "[Source Address]" }, 
+            destination: { address: "[Destination Address]" } 
+          },
+          originalAddresses: { 
+            address1: originalAddress1, 
+            address2: originalAddress2 
+          },
+          timestamp: new Date().toISOString()
+        };
+        
+        await dbService.getDb().collection('distances').insertOne(resultForStorage);
         result.saved = true;
       } catch (dbError) {
         console.error('Error saving to database:', dbError.message);
